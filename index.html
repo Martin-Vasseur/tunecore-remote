@@ -4345,22 +4345,76 @@ const RM = {
   tab: store.get('rmTab2', 'run'), lastSeq: null, busy: false, layoutKey: '',
   bikes: null, bikeOpen: false, cfg: undefined, draft: null, dirty: false,
   files: null, xfer: null, anal: null, reco: null,
+  known: [], seeking: '',                                 // boîtiers déjà autorisés sur ce site ; nom du boîtier cherché
 };
 
 /* ---------------------------------------------------------------- liaison */
+/** Choix d'un boîtier dans la fenêtre du navigateur (première fois, ou autre boîtier). */
 async function rmConnect() {
   if (!navigator.bluetooth) {
     toast('Bluetooth web indisponible. Utiliser Chrome ou Edge (Android, ordinateur) ou Bluefy (iPhone), page en https.', 8000);
     return;
   }
   try {
-    RM.dev = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'SuspLogger' }, { namePrefix: 'SuspensionLogger' }, { services: [NUS] }], optionalServices: [NUS, 'battery_service'] });
-    RM.dev.addEventListener('gattserverdisconnected', rmOnDisconnect);
+    const dev = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'SuspLogger' }, { namePrefix: 'SuspensionLogger' }, { services: [NUS] }], optionalServices: [NUS, 'battery_service'] });
+    rmUse(dev);
     RM.want = true;
     await rmOpen();
+    store.set('rmLastDev', dev.id);
+    rmLoadKnown();                                       // proposé directement à la prochaine ouverture
   } catch (e) {
     if (e && e.name !== 'NotFoundError') toast('Connexion refusée : ' + e.message + '. Rapprocher le téléphone du boîtier, puis réessayer.', 6000);
   }
+}
+
+function rmUse(dev) {
+  RM.dev = dev;
+  if (!dev._rmListen) { dev.addEventListener('gattserverdisconnected', rmOnDisconnect); dev._rmListen = true; }
+}
+
+/* Reconnexion SANS la fenêtre de choix : le navigateur garde l'autorisation d'un boîtier déjà choisi sur ce site
+   (navigator.bluetooth.getDevices, Chrome). On attend que le boîtier émette (watchAdvertisements) avant de se
+   connecter ; sans cette fonction, on tente la connexion directement. */
+async function rmLoadKnown() {
+  if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return [];
+  try {
+    const last = store.get('rmLastDev', '');
+    RM.known = (await navigator.bluetooth.getDevices()).filter(d => /^Susp/.test(d.name || ''))
+      .sort((a, b) => (b.id === last) - (a.id === last));
+  } catch (e) { RM.known = []; }
+  return RM.known;
+}
+
+async function rmReconnect(dev, waitMs = 20000) {
+  if (RM.conn || RM.demo || RM.seeking) return false;
+  RM.seeking = dev.name || 'boîtier';
+  rmRender();
+  let ok = false;
+  try {
+    if (dev.watchAdvertisements) {
+      const ac = new AbortController();
+      const seen = new Promise(res => {
+        dev.addEventListener('advertisementreceived', () => res(true), { once: true });
+        setTimeout(() => res(false), waitMs);
+      });
+      let watching = false;
+      try { await dev.watchAdvertisements({ signal: ac.signal }); watching = true; } catch (e) { /* tentative directe */ }
+      const inRange = watching ? await seen : true;
+      ac.abort();
+      if (!inRange || RM.conn || RM.demo) return false;
+    }
+    rmUse(dev);
+    RM.want = true;
+    await rmOpen();
+    store.set('rmLastDev', dev.id);
+    ok = true;
+  } catch (e) {
+    RM.want = false;
+  } finally {
+    RM.seeking = '';
+    rmRender();
+  }
+  return ok;
 }
 
 async function rmOpen() {
@@ -4369,11 +4423,12 @@ async function rmOpen() {
   const svc = await srv.getPrimaryService(NUS);
   RM.rx = await svc.getCharacteristic(NUS_RX);
   const tx = await svc.getCharacteristic(NUS_TX);
-  tx.addEventListener('characteristicvaluechanged', e => rmOnBytes(new Uint8Array(e.target.value.buffer)));
+  // le navigateur peut redonner les mêmes objets à la reconnexion : un seul écouteur par caractéristique
+  if (!tx._rmListen) { tx.addEventListener('characteristicvaluechanged', e => rmOnBytes(new Uint8Array(e.target.value.buffer))); tx._rmListen = true; }
   await tx.startNotifications();
   try {                                                  // données binaires (firmware 10.1 et suivants)
     const dc = await svc.getCharacteristic(NUS_DATA);
-    dc.addEventListener('characteristicvaluechanged', e => rmOnData(e.target.value));
+    if (!dc._rmListen) { dc.addEventListener('characteristicvaluechanged', e => rmOnData(e.target.value)); dc._rmListen = true; }
     await dc.startNotifications();
     RM.hasData = true;
   } catch (e) { RM.hasData = false; }
@@ -4603,16 +4658,21 @@ function rmRender() {
   rmBar();
   if (!RM.conn && !lost) {
     RM.layoutKey = ''; RM.shownTab = null; nav.classList.add('hidden');
+    const known = RM.known[0];
     box.innerHTML = `
       <div class="card zone">
         <span class="lbl">Bluetooth</span>
-        <strong>${RM.want ? '<span class="pulse">Reconnexion…</span>' : 'Boîtier non connecté'}</strong>
-        <p>Allumer le boîtier : il apparaît sous le nom « SuspLogger-… ».</p>
+        <strong>${RM.seeking ? `<span class="pulse">Recherche de ${esc(RM.seeking)}…</span>` : RM.want ? '<span class="pulse">Reconnexion…</span>' : 'Boîtier non connecté'}</strong>
+        <p>${RM.seeking ? 'Connexion automatique dès que le boîtier est allumé et à portée.' : known ? `Dernier boîtier : <b>${esc(known.name)}</b>. L’allumer, puis se connecter.` : 'Allumer le boîtier : il apparaît sous le nom « SuspLogger-… ».'}</p>
         ${navigator.bluetooth ? '' : banner('warn', 'Bluetooth web indisponible dans ce navigateur', 'Utiliser Chrome ou Edge (Android, ordinateur) ou Bluefy (iPhone), page ouverte en https.')}
-        <button class="btn primary bigbtn" id="rmConnect">${ico('bt')}Se connecter</button>
+        ${known && !RM.seeking ? `<button class="btn primary bigbtn" id="rmKnown">${ico('bt')}Se connecter</button>` : ''}
+        <button class="btn ${known ? '' : 'primary bigbtn'}" id="rmConnect">${known ? '' : ico('bt')}${known ? 'Autre boîtier…' : 'Se connecter'}</button>
         <button class="btn" id="rmDemo">Essayer en mode démo</button>
       </div>`;
-    $('#rmConnect').onclick = rmConnect;
+    if ($('#rmKnown')) $('#rmKnown').onclick = async () => {
+      if (!(await rmReconnect(known, 10000))) toast('Boîtier introuvable : l’allumer, rapprocher le téléphone, puis réessayer.', 5000);
+    };
+    $('#rmConnect').onclick = () => { RM.seeking = ''; rmConnect(); };
     $('#rmDemo').onclick = demoStart;
     return;
   }
@@ -5507,6 +5567,9 @@ if (/^#demo/.test(location.hash)) {
   if (TABS.some(t => t[0] === tab)) RM.tab = tab;
   demoStart();
   if (st === 'rec') setTimeout(() => demoCommand('start'), 600);
+} else {
+  // ouverture : reconnexion automatique au dernier boîtier utilisé, s'il est déjà autorisé sur ce site
+  rmLoadKnown().then(k => { rmRender(); if (k.length) rmReconnect(k[0]); });
 }
 </script>
 <script>
