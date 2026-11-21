@@ -1070,9 +1070,12 @@ function toast(msg, ms = 3400) {
 const ico = (name, cls) => `<svg class="ico${cls ? ' ' + cls : ''}" aria-hidden="true" focusable="false"><use href="#i-${name}"/></svg>`;
 const SEV_ICO = { ok: 'ok', good: 'ok', info: 'info', warn: 'warn', crit: 'err' };
 
-/** Potentiomètre c (0 fourche, 1 amortisseur) testé par le boîtier et non détecté : voie en l'air (firmware 11.0.8+,
-    champs pp = présents, ppk = testés ; absents des versions plus anciennes : jamais « absent »). */
-const potAbsent = (s, c) => !!s && s.ppk != null && !!(s.ppk & (1 << c)) && !(s.pp & (1 << c));
+/** Capteur k testé par le boîtier et non détecté : voie en l'air. k : 0 fourche, 1 amortisseur, 2 frein AV,
+    3 frein AR, 4 AUX analogique (firmware 11.0.8+ pour 0–1, 11.0.10+ pour 2–4 ; champs pp = présents,
+    ppk = testés ; absents des versions plus anciennes : jamais « absent »). */
+const sensorAbsent = (s, k) => !!s && s.ppk != null && !!(s.ppk & (1 << k)) && !(s.pp & (1 << k));
+const potAbsent = sensorAbsent;
+const SENSOR_NAME = ['Capteur de fourche', 'Capteur d’amortisseur', 'Capteur de frein avant', 'Capteur de frein arrière', 'Capteur AUX'];
 
 /** Message en place : ce qui s'est passé (titre) + quoi faire (texte), avec la forme et la teinte de sa gravité. */
 const banner = (sev, title, text) => `<div class="banner ${sev}" role="${sev === 'crit' ? 'alert' : 'status'}">${ico(SEV_ICO[sev] || 'info', sev)}<div class="grow"><b class="bt">${title}</b>${text || ''}</div></div>`;
@@ -4815,9 +4818,9 @@ function updateRun() {
   $('#rmMark').disabled = !rec || RM.busy;
   $('#rmFind').disabled = RM.busy;
   const mg = RM.info && RM.info.mg, short = mg ? [0, 1].find(c => mg[c] != null && mg[c] < 0 && (RM.info.chm & (1 << c))) : undefined;
-  const gone = RM.info ? [0, 1].find(c => (RM.info.chm & (1 << c)) && potAbsent(RM.lv, c)) : undefined;
+  const gone = RM.info ? [0, 1, 2, 3, 4].find(k => (k < 4 ? RM.info.chm & (1 << k) : RM.info.aux === 1) && sensorAbsent(RM.lv, k)) : undefined;
   setHTML($('#rmAlert'), idle && !s.sd ? banner('crit', 'Carte SD absente', 'Insérer la carte dans le boîtier.')
-    : idle && gone !== undefined ? banner('crit', 'Capteur ' + (gone ? 'd’amortisseur' : 'de fourche') + ' non détecté', 'Rien n’est relié à cette voie : capteur débranché, câble ou connecteur.')
+    : idle && gone !== undefined ? banner('crit', SENSOR_NAME[gone] + ' non détecté', 'Rien n’est relié à cette voie : capteur débranché, câble ou connecteur.')
     : idle && short !== undefined ? banner('crit', 'Capteur ' + (short ? 'd\'amortisseur' : 'de fourche') + ' trop court', 'Il talonnera ' + fmt(-mg[short], 0) + ' mm avant la fin de course de la suspension : vérifier son montage avant de rouler.')
     : idle && !s.z ? banner('warn', 'Zéro des suspensions absent', 'Calibrer le zéro, vélo soulevé, avant de démarrer.') : '');
   $('#rmBike').textContent = bikeNameNow() || 'Aucun vélo choisi';
@@ -5258,12 +5261,14 @@ function liveText(b) {
   if (!(l.ch & (1 << b))) return 'non lue';
   const v = l.mv && l.mv[b] >= 0 ? fmt(l.mv[b] / 1000, 2) + ' V' : 'brut ' + fmt(l.raw[b], 0);
   if (b < 2) return v + ' · ' + (potAbsent(l, b) ? 'capteur non détecté' : i.zm & (1 << b) ? fmt(l.mm[b], 1) + ' mm' : 'zéro absent');
+  if (sensorAbsent(l, b)) return v + ' · capteur non détecté';
   const k = l.bk[b - 2];
   return v + (k != null ? ' · ' + fmt(clamp(k, 0, 100), 0) + ' %' : '') + (l.mv && l.mv[b] >= 0 && l.mv[b] < 150 ? ' · 0 V : capteur débranché' : '');
 }
 function auxText() {
   const l = RM.lv, c = auxCfg();
   if (!l || !l.ax) return 'non lue';
+  if (l.ax.mv != null && sensorAbsent(l, 4)) return 'capteur non détecté';
   if (l.ax.hz != null) return fmt(l.ax.hz / (c.ppr || 1) * (c.circ || 2300) / 1000 * 3.6, 1) + ' km/h · ' + l.ax.n + ' impulsions';
   const V = l.ax.mv / 1000;
   return fmt(V, 2) + ' V' + (c.unit ? ' · ' + fmt(c.a * V + c.b, 1) + ' ' + c.unit : '');
