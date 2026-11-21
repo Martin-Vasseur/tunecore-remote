@@ -1070,6 +1070,10 @@ function toast(msg, ms = 3400) {
 const ico = (name, cls) => `<svg class="ico${cls ? ' ' + cls : ''}" aria-hidden="true" focusable="false"><use href="#i-${name}"/></svg>`;
 const SEV_ICO = { ok: 'ok', good: 'ok', info: 'info', warn: 'warn', crit: 'err' };
 
+/** Potentiomètre c (0 fourche, 1 amortisseur) testé par le boîtier et non détecté : voie en l'air (firmware 11.0.8+,
+    champs pp = présents, ppk = testés ; absents des versions plus anciennes : jamais « absent »). */
+const potAbsent = (s, c) => !!s && s.ppk != null && !!(s.ppk & (1 << c)) && !(s.pp & (1 << c));
+
 /** Message en place : ce qui s'est passé (titre) + quoi faire (texte), avec la forme et la teinte de sa gravité. */
 const banner = (sev, title, text) => `<div class="banner ${sev}" role="${sev === 'crit' ? 'alert' : 'status'}">${ico(SEV_ICO[sev] || 'info', sev)}<div class="grow"><b class="bt">${title}</b>${text || ''}</div></div>`;
 
@@ -4811,7 +4815,9 @@ function updateRun() {
   $('#rmMark').disabled = !rec || RM.busy;
   $('#rmFind').disabled = RM.busy;
   const mg = RM.info && RM.info.mg, short = mg ? [0, 1].find(c => mg[c] != null && mg[c] < 0 && (RM.info.chm & (1 << c))) : undefined;
+  const gone = RM.info ? [0, 1].find(c => (RM.info.chm & (1 << c)) && potAbsent(RM.lv, c)) : undefined;
   setHTML($('#rmAlert'), idle && !s.sd ? banner('crit', 'Carte SD absente', 'Insérer la carte dans le boîtier.')
+    : idle && gone !== undefined ? banner('crit', 'Capteur ' + (gone ? 'd’amortisseur' : 'de fourche') + ' non détecté', 'Rien n’est relié à cette voie : capteur débranché, câble ou connecteur.')
     : idle && short !== undefined ? banner('crit', 'Capteur ' + (short ? 'd\'amortisseur' : 'de fourche') + ' trop court', 'Il talonnera ' + fmt(-mg[short], 0) + ' mm avant la fin de course de la suspension : vérifier son montage avant de rouler.')
     : idle && !s.z ? banner('warn', 'Zéro des suspensions absent', 'Calibrer le zéro, vélo soulevé, avant de démarrer.') : '');
   $('#rmBike').textContent = bikeNameNow() || 'Aucun vélo choisi';
@@ -5251,7 +5257,7 @@ function liveText(b) {
   if (!l || !i) return '—';
   if (!(l.ch & (1 << b))) return 'non lue';
   const v = l.mv && l.mv[b] >= 0 ? fmt(l.mv[b] / 1000, 2) + ' V' : 'brut ' + fmt(l.raw[b], 0);
-  if (b < 2) return v + ' · ' + (i.zm & (1 << b) ? fmt(l.mm[b], 1) + ' mm' : 'zéro absent');
+  if (b < 2) return v + ' · ' + (potAbsent(l, b) ? 'capteur non détecté' : i.zm & (1 << b) ? fmt(l.mm[b], 1) + ' mm' : 'zéro absent');
   const k = l.bk[b - 2];
   return v + (k != null ? ' · ' + fmt(clamp(k, 0, 100), 0) + ' %' : '') + (l.mv && l.mv[b] >= 0 && l.mv[b] < 150 ? ' · 0 V : capteur débranché' : '');
 }
@@ -5284,12 +5290,12 @@ function rmGauges() {
   }
   const l = RM.lv;
   used.forEach(c => {
-    const k = K[c], T = i.travel && i.travel[c] > 0 ? i.travel[c] : (i.pot ? i.pot[c] * 0.85 : 100), ok = !!(i.zm & (1 << c)) && !!(l && l.mm);
+    const k = K[c], T = i.travel && i.travel[c] > 0 ? i.travel[c] : (i.pot ? i.pot[c] * 0.85 : 100), gone = potAbsent(l, c), ok = !!(i.zm & (1 << c)) && !!(l && l.mm) && !gone;
     const t = sagTarget(RM.cfg || {}, c), z = t ? t.range : SAG_LIVE_RM[c];
     const ze = $('#rg_' + k + '_z');
     ze.style.left = z[0] + '%'; ze.style.width = (z[1] - z[0]) + '%'; ze.title = 'Sag visé ' + z[0] + '–' + z[1] + ' %';
     if (!ok) {
-      setHTML($('#rg_' + k + '_v'), `<small>${i.zm & (1 << c) ? 'en attente' : 'zéro absent'}</small>`);
+      setHTML($('#rg_' + k + '_v'), `<small>${gone ? 'capteur non détecté' : i.zm & (1 << c) ? 'en attente' : 'zéro absent'}</small>`);
       $('#rg_' + k + '_b').style.width = '0';
       $('#rg_' + k + '_p').hidden = true;
       $('#rg_' + k).classList.remove('inzone');
